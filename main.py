@@ -10,11 +10,14 @@ from email.utils import parsedate_to_datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import gspread
 
-KEYWORDS = ["トヨタ", "Toyota", "toyota"]
+KEYWORD = "ホンダ"
 SPREADSHEET_ID = "1RglATeTbLU1SqlfXnNToJqhXLdNoHCdePldioKDQgU8"
 
 def format_datetime(dt_obj):
@@ -168,37 +171,37 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    url = f"https://www.bing.com/news/search?q={keyword}&qft=sortbydate%3d'1'&form=YFNR"
+
+    url = f"https://www.bing.com/news/search?q={keyword}&qft=sortbydate%3d'1'&form=YFNR&setLang=ja-JP"
     driver.get(url)
-    time.sleep(5)
+
+    try:
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "a.title"))
+        )
+    except:
+        print("⚠️ MSNの読み込みに時間がかかっています")
 
     soup = BeautifulSoup(driver.page_source, "html.parser")
     driver.quit()
-    cards = soup.select("div.news-card")
+
+    cards = soup.select("a.title")
     data = []
 
-    for card in cards:
+    for a_tag in cards:
         try:
-            title = card.get("data-title", "").strip()
-            url = card.get("data-url", "").strip()
-            source = card.get("data-author", "").strip()
-            pub_label = ""
-            pub_date = ""
-
-            pub_tag = card.find("span", attrs={"aria-label": True})
-            if pub_tag and pub_tag.has_attr("aria-label"):
-                pub_label = pub_tag["aria-label"].strip().lower()
-
-            pub_date = parse_relative_time(pub_label, now)
-            if pub_date == "取得不可" and url:
-                pub_date = get_last_modified_datetime(url)
+            title = a_tag.text.strip()
+            url = a_tag.get("href")
+            source_tag = a_tag.find_parent().find_next_sibling("div")
+            source = source_tag.text.strip() if source_tag else "MSN"
+            pub_date = get_last_modified_datetime(url) or "取得不可"
 
             if title and url:
                 data.append({
                     "タイトル": title,
                     "URL": url,
                     "投稿日": pub_date,
-                    "引用元": source if source else "MSN"
+                    "引用元": source
                 })
         except Exception as e:
             print(f"⚠️ MSN記事処理エラー: {e}")
@@ -237,22 +240,18 @@ def write_to_spreadsheet(articles: list[dict], spreadsheet_id: str, worksheet_na
 
     raise RuntimeError("❌ Googleスプレッドシートへの書き込みに失敗しました（5回試行しても成功せず）")
 
-# ✅ メイン処理：全キーワードに対して処理
 if __name__ == "__main__":
-    for kw in KEYWORDS:
-        print(f"\n=== キーワード: {kw} ===")
+    print("\n--- Google News ---")
+    google_news_articles = get_google_news_with_selenium(KEYWORD)
+    if google_news_articles:
+        write_to_spreadsheet(google_news_articles, SPREADSHEET_ID, "Google")
 
-        print("\n--- Google News ---")
-        google_news_articles = get_google_news_with_selenium(kw)
-        if google_news_articles:
-            write_to_spreadsheet(google_news_articles, SPREADSHEET_ID, "Google")
+    print("\n--- Yahoo! News ---")
+    yahoo_news_articles = get_yahoo_news_with_selenium(KEYWORD)
+    if yahoo_news_articles:
+        write_to_spreadsheet(yahoo_news_articles, SPREADSHEET_ID, "Yahoo")
 
-        print("\n--- Yahoo! News ---")
-        yahoo_news_articles = get_yahoo_news_with_selenium(kw)
-        if yahoo_news_articles:
-            write_to_spreadsheet(yahoo_news_articles, SPREADSHEET_ID, "Yahoo")
-
-        print("\n--- MSN News ---")
-        msn_news_articles = get_msn_news_with_selenium(kw)
-        if msn_news_articles:
-            write_to_spreadsheet(msn_news_articles, SPREADSHEET_ID, "MSN")
+    print("\n--- MSN News ---")
+    msn_news_articles = get_msn_news_with_selenium(KEYWORD)
+    if msn_news_articles:
+        write_to_spreadsheet(msn_news_articles, SPREADSHEET_ID, "MSN")
