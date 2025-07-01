@@ -168,38 +168,40 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+
     url = f"https://www.bing.com/news/search?q={keyword}&qft=sortbydate%3d'1'&form=YFNR"
     driver.get(url)
     time.sleep(5)
 
     soup = BeautifulSoup(driver.page_source, "html.parser")
     driver.quit()
-    cards = soup.find_all("div", class_=lambda c: c and "news-card" in c)
+
     data = []
+    cards = soup.find_all("div", class_="news-card newsitem cardcommon b_cards2")
 
     for card in cards:
         try:
             a_tag = card.find("a", href=True)
-            title_div = card.find("div", class_="t_t")
-            source_div = card.find("div", class_="source")
-            pub_span = card.find("span", attrs={"aria-label": True})
+            if not a_tag:
+                continue
+            title = a_tag.get_text(strip=True)
+            url = a_tag["href"].strip()
 
-            title = title_div.get_text(strip=True) if title_div else ""
-            url = a_tag["href"].strip() if a_tag else ""
-            source = source_div.get_text(strip=True) if source_div else "MSN"
-            pub_label = pub_span["aria-label"].strip() if pub_span else ""
+            source_tag = card.find("div", class_="source")
+            source = source_tag.get_text(strip=True) if source_tag else "MSN"
+
+            pub_tag = card.find("span", attrs={"aria-label": True})
+            pub_label = pub_tag["aria-label"].strip() if pub_tag and pub_tag.has_attr("aria-label") else ""
             pub_date = parse_relative_time(pub_label, now)
-
             if pub_date == "取得不可" and url:
                 pub_date = get_last_modified_datetime(url)
 
-            if title and url:
-                data.append({
-                    "タイトル": title,
-                    "URL": url,
-                    "投稿日": pub_date,
-                    "引用元": source
-                })
+            data.append({
+                "タイトル": title,
+                "URL": url,
+                "投稿日": pub_date,
+                "引用元": source
+            })
         except Exception as e:
             print(f"⚠️ MSN記事処理エラー: {e}")
             continue
