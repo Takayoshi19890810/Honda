@@ -10,14 +10,11 @@ from email.utils import parsedate_to_datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import gspread
 
-KEYWORD = "ホンダ"
+KEYWORD = "ホンダ"  # ← 必要に応じて変更
 SPREADSHEET_ID = "1RglATeTbLU1SqlfXnNToJqhXLdNoHCdePldioKDQgU8"
 
 def format_datetime(dt_obj):
@@ -41,18 +38,6 @@ def parse_relative_time(pub_label: str, base_time: datetime) -> str:
             if d:
                 dt = base_time - timedelta(days=int(d.group(1)))
                 return format_datetime(dt)
-        elif re.match(r'\d+月\d+日', pub_label):
-            dt = datetime.strptime(f"{base_time.year}年{pub_label}", "%Y年%m月%d日")
-            return format_datetime(dt)
-        elif re.match(r'\d{4}/\d{1,2}/\d{1,2}', pub_label):
-            dt = datetime.strptime(pub_label, "%Y/%m/%d")
-            return format_datetime(dt)
-        elif re.match(r'\d{1,2}:\d{2}', pub_label):
-            t = datetime.strptime(pub_label, "%H:%M").time()
-            dt = datetime.combine(base_time.date(), t)
-            if dt > base_time:
-                dt -= timedelta(days=1)
-            return format_datetime(dt)
     except:
         pass
     return "取得不可"
@@ -171,30 +156,30 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-
-    url = f"https://www.bing.com/news/search?q={keyword}&qft=sortbydate%3d'1'&form=YFNR&setLang=ja-JP"
+    url = f"https://www.bing.com/news/search?q={keyword}&qft=sortbydate%3d'1'&form=YFNR"
     driver.get(url)
-
-    try:
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "a.title"))
-        )
-    except:
-        print("⚠️ MSNの読み込みに時間がかかっています")
+    time.sleep(5)
 
     soup = BeautifulSoup(driver.page_source, "html.parser")
     driver.quit()
-
-    cards = soup.select("a.title")
     data = []
 
-    for a_tag in cards:
+    articles = soup.select("div.t_s")  # 新しい記事構造に対応
+    for article in articles:
         try:
-            title = a_tag.text.strip()
-            url = a_tag.get("href")
-            source_tag = a_tag.find_parent().find_next_sibling("div")
+            a_tag = article.select_one("a.title")
+            title = a_tag.text.strip() if a_tag else ""
+            url = a_tag["href"] if a_tag and a_tag.has_attr("href") else ""
+
+            source_tag = article.select_one("div.source")
             source = source_tag.text.strip() if source_tag else "MSN"
-            pub_date = get_last_modified_datetime(url) or "取得不可"
+
+            pub_tag = article.find("span", attrs={"aria-label": True})
+            pub_label = pub_tag["aria-label"].strip() if pub_tag and pub_tag.has_attr("aria-label") else ""
+            pub_date = parse_relative_time(pub_label, now)
+
+            if pub_date == "取得不可" and url:
+                pub_date = get_last_modified_datetime(url)
 
             if title and url:
                 data.append({
