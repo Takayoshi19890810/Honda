@@ -151,7 +151,8 @@ def get_msn_news_with_selenium(keyword: str):
     driver.quit()
 
     data = []
-    for card in soup.select("div.news-card"):
+
+    for card in soup.find_all(attrs={"data-title": True, "data-url": True}):
         try:
             title = card.get("data-title", "").strip()
             url = card.get("data-url", "").strip()
@@ -164,11 +165,12 @@ def get_msn_news_with_selenium(keyword: str):
             if pub_date == "取得不可" and url:
                 pub_date = get_last_modified_datetime(url)
 
-            # ✅ タイトルに日本語が含まれているニュースのみ取得（reベースで緩く判定）
             if title and url and re.search(r'[ぁ-んァ-ン一-龥]', title):
                 data.append({"タイトル": title, "URL": url, "投稿日": pub_date, "引用元": source or "MSN"})
-        except:
+        except Exception as e:
+            print(f"⚠️ MSN記事処理エラー: {e}")
             continue
+
     print(f"✅ MSNニュース件数: {len(data)} 件（{keyword}）")
     return data
 
