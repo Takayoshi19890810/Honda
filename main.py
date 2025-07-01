@@ -14,7 +14,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import gspread
 
-KEYWORD = "ホンダ"  # ← 必要に応じて変更
+KEYWORD = "ホンダ"
 SPREADSHEET_ID = "1RglATeTbLU1SqlfXnNToJqhXLdNoHCdePldioKDQgU8"
 
 def format_datetime(dt_obj):
@@ -38,6 +38,18 @@ def parse_relative_time(pub_label: str, base_time: datetime) -> str:
             if d:
                 dt = base_time - timedelta(days=int(d.group(1)))
                 return format_datetime(dt)
+        elif re.match(r'\d+月\d+日', pub_label):
+            dt = datetime.strptime(f"{base_time.year}年{pub_label}", "%Y年%m月%d日")
+            return format_datetime(dt)
+        elif re.match(r'\d{4}/\d{1,2}/\d{1,2}', pub_label):
+            dt = datetime.strptime(pub_label, "%Y/%m/%d")
+            return format_datetime(dt)
+        elif re.match(r'\d{1,2}:\d{2}', pub_label):
+            t = datetime.strptime(pub_label, "%H:%M").time()
+            dt = datetime.combine(base_time.date(), t)
+            if dt > base_time:
+                dt -= timedelta(days=1)
+            return format_datetime(dt)
     except:
         pass
     return "取得不可"
@@ -162,20 +174,20 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
 
     soup = BeautifulSoup(driver.page_source, "html.parser")
     driver.quit()
+    cards = soup.find_all("div", class_=lambda c: c and "news-card" in c)
     data = []
 
-    articles = soup.select("div.t_s")  # 新しい記事構造に対応
-    for article in articles:
+    for card in cards:
         try:
-            a_tag = article.select_one("a.title")
-            title = a_tag.text.strip() if a_tag else ""
-            url = a_tag["href"] if a_tag and a_tag.has_attr("href") else ""
+            a_tag = card.find("a", href=True)
+            title_div = card.find("div", class_="t_t")
+            source_div = card.find("div", class_="source")
+            pub_span = card.find("span", attrs={"aria-label": True})
 
-            source_tag = article.select_one("div.source")
-            source = source_tag.text.strip() if source_tag else "MSN"
-
-            pub_tag = article.find("span", attrs={"aria-label": True})
-            pub_label = pub_tag["aria-label"].strip() if pub_tag and pub_tag.has_attr("aria-label") else ""
+            title = title_div.get_text(strip=True) if title_div else ""
+            url = a_tag["href"].strip() if a_tag else ""
+            source = source_div.get_text(strip=True) if source_div else "MSN"
+            pub_label = pub_span["aria-label"].strip() if pub_span else ""
             pub_date = parse_relative_time(pub_label, now)
 
             if pub_date == "取得不可" and url:
