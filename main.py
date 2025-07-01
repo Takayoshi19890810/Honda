@@ -14,7 +14,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import gspread
 
-KEYWORDS = ["HONDA", "honda", "ホンダ"]
+KEYWORDS = ["トヨタ", "Toyota", "toyota"]
 SPREADSHEET_ID = "1RglATeTbLU1SqlfXnNToJqhXLdNoHCdePldioKDQgU8"
 
 def format_datetime(dt_obj):
@@ -190,7 +190,6 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
                 pub_label = pub_tag["aria-label"].strip().lower()
 
             pub_date = parse_relative_time(pub_label, now)
-
             if pub_date == "取得不可" and url:
                 pub_date = get_last_modified_datetime(url)
 
@@ -238,18 +237,22 @@ def write_to_spreadsheet(articles: list[dict], spreadsheet_id: str, worksheet_na
 
     raise RuntimeError("❌ Googleスプレッドシートへの書き込みに失敗しました（5回試行しても成功せず）")
 
+# ✅ メイン処理：全キーワードに対して処理
 if __name__ == "__main__":
-    print("\n--- Google News ---")
-    google_news_articles = get_google_news_with_selenium(KEYWORD)
-    if google_news_articles:
-        write_to_spreadsheet(google_news_articles, SPREADSHEET_ID, "Google")
+    for kw in KEYWORDS:
+        print(f"\n=== キーワード: {kw} ===")
 
-    print("\n--- Yahoo! News ---")
-    yahoo_news_articles = get_yahoo_news_with_selenium(KEYWORD)
-    if yahoo_news_articles:
-        write_to_spreadsheet(yahoo_news_articles, SPREADSHEET_ID, "Yahoo")
+        print("\n--- Google News ---")
+        google_news_articles = get_google_news_with_selenium(kw)
+        if google_news_articles:
+            write_to_spreadsheet(google_news_articles, SPREADSHEET_ID, "Google")
 
-    print("\n--- MSN News ---")
-    msn_news_articles = get_msn_news_with_selenium(KEYWORD)
-    if msn_news_articles:
-        write_to_spreadsheet(msn_news_articles, SPREADSHEET_ID, "MSN")
+        print("\n--- Yahoo! News ---")
+        yahoo_news_articles = get_yahoo_news_with_selenium(kw)
+        if yahoo_news_articles:
+            write_to_spreadsheet(yahoo_news_articles, SPREADSHEET_ID, "Yahoo")
+
+        print("\n--- MSN News ---")
+        msn_news_articles = get_msn_news_with_selenium(kw)
+        if msn_news_articles:
+            write_to_spreadsheet(msn_news_articles, SPREADSHEET_ID, "MSN")
