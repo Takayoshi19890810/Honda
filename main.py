@@ -10,7 +10,8 @@ import re
 from openpyxl import load_workbook
 from openpyxl.worksheet.table import Table, TableStyleInfo
 import os
-import json # gspreadの認証情報のため
+import json
+import gspread # ここでgspreadをインポートしています
 
 # ✅ 現在時刻（JST） - 全ニュースソースで使用
 now = datetime.utcnow() + timedelta(hours=9)
@@ -261,6 +262,7 @@ if __name__ == "__main__":
     # ここで重複排除 (get_msn_news_with_selenium 内ではキーワードごとの重複排除はしていないため)
     df_msn = pd.DataFrame(msn_news_articles)
     if not df_msn.empty:
+        # スプレッドシートに書き込む前に重複排除をかける
         df_msn.drop_duplicates(subset=["URL"], inplace=True)
         write_to_spreadsheet(df_msn.to_dict('records'), SPREADSHEET_ID, "MSN")
     else:
@@ -270,7 +272,14 @@ if __name__ == "__main__":
 
     # ローカルExcelファイルへの書き出し処理（元のMSN専用スクリプトから統合）
     # 全てのデータを統合して重複排除
-    combined_all_data = google_news_articles + yahoo_news_articles + msn_news_articles # 型がdictのリストであることを前提
+    # 各ソースの取得結果が空でないことを確認してから結合
+    combined_all_data = []
+    if google_news_articles:
+        combined_all_data.extend(google_news_articles)
+    if yahoo_news_articles:
+        combined_all_data.extend(yahoo_news_articles)
+    if msn_news_articles: # msn_news_articlesはdf_msnをto_dict('records')する前のリスト
+        combined_all_data.extend(msn_news_articles)
 
     # combined_all_data を DataFrame に変換して重複排除
     df_combined = pd.DataFrame(combined_all_data)
