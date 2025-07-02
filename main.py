@@ -51,7 +51,8 @@ def get_google_news_with_selenium(keyword: str) -> list[dict]:
             pub_date = format_datetime(dt)
             source = source_tag.text.strip() if source_tag else "N/A"
             data.append({"タイトル": title, "URL": url, "投稿日": pub_date, "引用元": source})
-        except:
+        except Exception as e:
+            # print(f"⚠️ Google記事処理エラー: {e}") # デバッグ用
             continue
     print(f"✅ Googleニュース件数: {len(data)} 件")
     return data
@@ -85,8 +86,8 @@ def get_yahoo_news_with_selenium(keyword: str) -> list[dict]:
                 try:
                     dt_obj = datetime.strptime(date_str, "%Y/%m/%d %H:%M")
                     formatted_date = format_datetime(dt_obj)
-                except:
-                    formatted_date = date_str
+                except ValueError:
+                    formatted_date = date_str # フォーマットできない場合はそのまま
             source_text = "Yahoo!"
             if title and url:
                 data.append({
@@ -95,14 +96,14 @@ def get_yahoo_news_with_selenium(keyword: str) -> list[dict]:
                     "投稿日": formatted_date if formatted_date else "取得不可",
                     "引用元": source_text
                 })
-        except:
+        except Exception as e:
+            # print(f"⚠️ Yahoo!記事処理エラー: {e}") # デバッグ用
             continue
 
     print(f"✅ Yahoo!ニュース件数: {len(data)} 件")
     return data
 
 def get_msn_news_with_selenium(keyword: str) -> list[dict]:
-    now = datetime.utcnow() + timedelta(hours=9)
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--disable-gpu")
@@ -110,26 +111,33 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     url = f"https://www.bing.com/news/search?q={keyword}&qft=sortbydate%3d'1'&form=YFNR"
     driver.get(url)
-    time.sleep(5)
+    time.sleep(5) # ページが完全にロードされるように少し長めに待つ
 
     soup = BeautifulSoup(driver.page_source, "html.parser")
     driver.quit()
     data = []
 
-    for a in soup.select("a.title"):
+    # 記事のコンテナ要素を特定し、その中のタイトルとURLを抽出
+    # .b_algoと.b_ansがニュース記事の個別のブロックになっていると仮定
+    # その中のh2タグ内のaタグがタイトルとURLを持つと仮定
+    for a_tag in soup.select(".b_algo h2 a, .b_ans h2 a"):
         try:
-            title = a.get("aria-label", "").strip()
-            url = a.get("href", "").strip()
+            title = a_tag.get_text(strip=True)
+            url = a_tag.get("href", "").strip()
+
             if not url.startswith("http"):
-                continue
+                continue # 有効なURLでない場合はスキップ
+
+            # 投稿日は現在のソースからは直接特定が難しいため、「取得不可」とする
+            # 必要であれば、記事の親要素から日付情報を探すセレクタを追加
             data.append({
                 "タイトル": title,
                 "URL": url,
-                "投稿日": "取得不可",
+                "投稿日": "取得不可", # 要調査：正確な投稿日を取得するためのセレクタが必要
                 "引用元": "MSN"
             })
         except Exception as e:
-            print(f"⚠️ MSN記事処理エラー: {e}")
+            print(f"⚠️ MSN記事処理エラー: {e}") # エラーの詳細を出力してデバッグしやすくする
             continue
 
     print(f"✅ MSNニュース件数: {len(data)} 件")
