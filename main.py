@@ -14,56 +14,92 @@ from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import gspread
 
+# ✅ キーワードとスプレッドシート設定
 KEYWORD = "ホンダ"
 SPREADSHEET_ID = "1AwwMGKMHfduwPkrtsik40lkO1z1T8IU_yd41ku-yPi8"
 
 def format_datetime(dt_obj):
     return dt_obj.strftime("%Y/%m/%d %H:%M")
 
-def parse_relative_time(pub_label: str, base_time: datetime) -> str:
-    pub_label = pub_label.strip().lower()
-    try:
-        if "分前" in pub_label or "minute" in pub_label:
-            m = re.search(r"(\d+)", pub_label)
-            if m:
-                dt = base_time - timedelta(minutes=int(m.group(1)))
-                return format_datetime(dt)
-        elif "時間前" in pub_label or "hour" in pub_label:
-            h = re.search(r"(\d+)", pub_label)
-            if h:
-                dt = base_time - timedelta(hours=int(h.group(1)))
-                return format_datetime(dt)
-        elif "日前" in pub_label or "day" in pub_label:
-            d = re.search(r"(\d+)", pub_label)
-            if d:
-                dt = base_time - timedelta(days=int(d.group(1)))
-                return format_datetime(dt)
-        elif re.match(r'\d+月\d+日', pub_label):
-            dt = datetime.strptime(f"{base_time.year}年{pub_label}", "%Y年%m月%d日")
-            return format_datetime(dt)
-        elif re.match(r'\d{4}/\d{1,2}/\d{1,2}', pub_label):
-            dt = datetime.strptime(pub_label, "%Y/%m/%d")
-            return format_datetime(dt)
-        elif re.match(r'\d{1,2}:\d{2}', pub_label):
-            t = datetime.strptime(pub_label, "%H:%M").time()
-            dt = datetime.combine(base_time.date(), t)
-            if dt > base_time:
-                dt -= timedelta(days=1)
-            return format_datetime(dt)
-    except:
-        pass
-    return "取得不可"
+def get_google_news_with_selenium(keyword: str) -> list[dict]:
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    url = f"https://news.google.com/search?q={keyword}&hl=ja&gl=JP&ceid=JP:ja"
+    driver.get(url)
+    time.sleep(5)
+    for _ in range(3):
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
 
-def get_last_modified_datetime(url):
-    try:
-        response = requests.head(url, timeout=5)
-        if 'Last-Modified' in response.headers:
-            dt = parsedate_to_datetime(response.headers['Last-Modified'])
-            jst = dt.astimezone(tz=timedelta(hours=9))
-            return format_datetime(jst)
-    except:
-        pass
-    return "取得不可"
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    driver.quit()
+
+    articles = soup.find_all("article")
+    data = []
+    for article in articles:
+        try:
+            a_tag = article.select_one("a.JtKRv")
+            time_tag = article.select_one("time.hvbAAd")
+            source_tag = article.select_one("div.vr1PYe")
+            title = a_tag.text.strip()
+            href = a_tag.get("href")
+            url = "https://news.google.com" + href[1:] if href.startswith("./") else href
+            dt = datetime.strptime(time_tag.get("datetime"), "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=9)
+            pub_date = format_datetime(dt)
+            source = source_tag.text.strip() if source_tag else "N/A"
+            data.append({"タイトル": title, "URL": url, "投稿日": pub_date, "引用元": source})
+        except:
+            continue
+    print(f"✅ Googleニュース件数: {len(data)} 件")
+    return data
+
+def get_yahoo_news_with_selenium(keyword: str) -> list[dict]:
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    search_url = f"https://news.yahoo.co.jp/search?p={keyword}&ei=utf-8"
+    driver.get(search_url)
+    time.sleep(5)
+
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    driver.quit()
+    articles = soup.find_all("li", class_=re.compile("sc-1u4589e-0"))
+    data = []
+
+    for article in articles:
+        try:
+            title_tag = article.find("div", class_=re.compile("sc-3ls169-0"))
+            title = title_tag.text.strip() if title_tag else ""
+            link_tag = article.find("a", href=True)
+            url = link_tag["href"] if link_tag else ""
+            time_tag = article.find("time")
+            date_str = time_tag.text.strip() if time_tag else ""
+            formatted_date = ""
+            if date_str:
+                date_str = re.sub(r'\([月火水木金土日]\)', '', date_str).strip()
+                try:
+                    dt_obj = datetime.strptime(date_str, "%Y/%m/%d %H:%M")
+                    formatted_date = format_datetime(dt_obj)
+                except:
+                    formatted_date = date_str
+            source_text = "Yahoo!"
+            if title and url:
+                data.append({
+                    "タイトル": title,
+                    "URL": url,
+                    "投稿日": formatted_date if formatted_date else "取得不可",
+                    "引用元": source_text
+                })
+        except:
+            continue
+
+    print(f"✅ Yahoo!ニュース件数: {len(data)} 件")
+    return data
 
 def get_msn_news_with_selenium(keyword: str) -> list[dict]:
     now = datetime.utcnow() + timedelta(hours=9)
@@ -78,29 +114,20 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
 
     soup = BeautifulSoup(driver.page_source, "html.parser")
     driver.quit()
-
     data = []
-    articles = soup.select("a.t_s")
-    for article in articles:
+
+    for a in soup.select("a.title"):
         try:
-            title = article.text.strip()
-            url = article.get("href", "").strip()
-            source_tag = article.find_next("div", class_="source")
-            source = source_tag.text.strip() if source_tag else "MSN"
-            time_tag = article.find_next("span")
-            pub_label = time_tag.text.strip() if time_tag else ""
-
-            pub_date = parse_relative_time(pub_label, now)
-            if pub_date == "取得不可" and url:
-                pub_date = get_last_modified_datetime(url)
-
-            if title and url:
-                data.append({
-                    "タイトル": title,
-                    "URL": url,
-                    "投稿日": pub_date,
-                    "引用元": source
-                })
+            title = a.get("aria-label", "").strip()
+            url = a.get("href", "").strip()
+            if not url.startswith("http"):
+                continue
+            data.append({
+                "タイトル": title,
+                "URL": url,
+                "投稿日": "取得不可",
+                "引用元": "MSN"
+            })
         except Exception as e:
             print(f"⚠️ MSN記事処理エラー: {e}")
             continue
@@ -139,6 +166,16 @@ def write_to_spreadsheet(articles: list[dict], spreadsheet_id: str, worksheet_na
     raise RuntimeError("❌ Googleスプレッドシートへの書き込みに失敗しました（5回試行しても成功せず）")
 
 if __name__ == "__main__":
+    print("\n--- Google News ---")
+    google_news_articles = get_google_news_with_selenium(KEYWORD)
+    if google_news_articles:
+        write_to_spreadsheet(google_news_articles, SPREADSHEET_ID, "Google")
+
+    print("\n--- Yahoo! News ---")
+    yahoo_news_articles = get_yahoo_news_with_selenium(KEYWORD)
+    if yahoo_news_articles:
+        write_to_spreadsheet(yahoo_news_articles, SPREADSHEET_ID, "Yahoo")
+
     print("\n--- MSN News ---")
     msn_news_articles = get_msn_news_with_selenium(KEYWORD)
     if msn_news_articles:
