@@ -14,7 +14,6 @@ from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import gspread
 
-# ✅ 設定（キーワード・スプレッドシートID）
 KEYWORD = "ホンダ"
 SPREADSHEET_ID = "1AwwMGKMHfduwPkrtsik40lkO1z1T8IU_yd41ku-yPi8"
 
@@ -78,6 +77,7 @@ def get_google_news_with_selenium(keyword: str) -> list[dict]:
     for _ in range(3):
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(2)
+
     soup = BeautifulSoup(driver.page_source, "html.parser")
     driver.quit()
 
@@ -168,38 +168,37 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+
     url = f"https://www.bing.com/news/search?q={keyword}&qft=sortbydate%3d'1'&form=YFNR"
     driver.get(url)
     time.sleep(5)
+
     soup = BeautifulSoup(driver.page_source, "html.parser")
     driver.quit()
-    cards = soup.select("div.news-card")
+
+    articles = soup.select("div.t_s")  # ✅ 最新構造に対応
     data = []
 
-    for card in cards:
+    for article in articles:
         try:
-            title = card.get("data-title", "").strip()
-            url = card.get("data-url", "").strip()
-            source = card.get("data-author", "").strip()
-            pub_label = ""
-            pub_date = ""
-
-            pub_tag = card.find("span", attrs={"aria-label": True})
-            if pub_tag and pub_tag.has_attr("aria-label"):
-                pub_label = pub_tag["aria-label"].strip().lower()
+            a_tag = article.select_one("a")
+            title = a_tag.text.strip()
+            url = a_tag["href"]
+            source_tag = article.select_one("div.source")
+            source = source_tag.text.strip() if source_tag else "MSN"
+            time_tag = article.select_one("span.news_dt")
+            pub_label = time_tag.text.strip() if time_tag else ""
 
             pub_date = parse_relative_time(pub_label, now)
-
             if pub_date == "取得不可" and url:
                 pub_date = get_last_modified_datetime(url)
 
-            if title and url:
-                data.append({
-                    "タイトル": title,
-                    "URL": url,
-                    "投稿日": pub_date,
-                    "引用元": source if source else "MSN"
-                })
+            data.append({
+                "タイトル": title,
+                "URL": url,
+                "投稿日": pub_date,
+                "引用元": source
+            })
         except Exception as e:
             print(f"⚠️ MSN記事処理エラー: {e}")
             continue
