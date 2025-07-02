@@ -1,6 +1,6 @@
+beautifulsoup4
 selenium
 webdriver-manager
-beautifulsoup4
 gspread
 oauth2client
 requests
