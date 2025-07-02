@@ -1,5 +1,6 @@
-gspread
+pandas
 selenium
-webdriver_manager
-requests
 beautifulsoup4
+webdriver-manager
+gspread
+oauth2client
