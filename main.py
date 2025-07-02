@@ -181,7 +181,7 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
 
     soup = BeautifulSoup(driver.page_source, "html.parser")
     driver.quit()
-    cards = soup.select("a.title")  # ← 修正済みセレクタ
+    cards = soup.select("a.title")
     data = []
 
     for card in cards:
@@ -204,6 +204,33 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
 
     print(f"✅ MSNニュース件数: {len(data)} 件")
     return data
+
+
+def write_to_spreadsheet(articles: list[dict], spreadsheet_id: str, sheet_name: str):
+    creds = json.loads(os.environ["GCP_SERVICE_ACCOUNT_KEY"])
+    client = gspread.service_account_from_dict(creds)
+
+    try:
+        sh = client.open_by_key(spreadsheet_id)
+        try:
+            worksheet = sh.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = sh.add_worksheet(title=sheet_name, rows="1000", cols="10")
+            worksheet.append_row(["タイトル", "URL", "投稿日", "引用元"])
+
+        existing_urls = worksheet.col_values(2)[1:]
+        new_rows = []
+        for article in articles:
+            if article["URL"] not in existing_urls:
+                new_rows.append([article["タイトル"], article["URL"], article["投稿日"], article["引用元"]])
+
+        if new_rows:
+            worksheet.append_rows(new_rows)
+            print(f"✅ {len(new_rows)}件をスプレッドシートに追記しました。")
+        else:
+            print("⚠️ 新しい記事はありませんでした。")
+    except Exception as e:
+        print(f"❌ スプレッドシート書き込みエラー: {e}")
 
 
 if __name__ == "__main__":
