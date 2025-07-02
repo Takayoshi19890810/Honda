@@ -14,14 +14,12 @@ from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import gspread
 
-# ✅ 設定
+# ✅ キーワードとスプレッドシートIDを修正
 KEYWORD = "ホンダ"
 SPREADSHEET_ID = "1AwwMGKMHfduwPkrtsik40lkO1z1T8IU_yd41ku-yPi8"
 
-
 def format_datetime(dt_obj):
     return dt_obj.strftime("%Y/%m/%d %H:%M")
-
 
 def parse_relative_time(pub_label: str, base_time: datetime) -> str:
     pub_label = pub_label.strip().lower()
@@ -57,7 +55,6 @@ def parse_relative_time(pub_label: str, base_time: datetime) -> str:
         pass
     return "取得不可"
 
-
 def get_last_modified_datetime(url):
     try:
         response = requests.head(url, timeout=5)
@@ -68,7 +65,6 @@ def get_last_modified_datetime(url):
     except:
         pass
     return "取得不可"
-
 
 def get_google_news_with_selenium(keyword: str) -> list[dict]:
     options = Options()
@@ -104,7 +100,6 @@ def get_google_news_with_selenium(keyword: str) -> list[dict]:
             continue
     print(f"✅ Googleニュース件数: {len(data)} 件")
     return data
-
 
 def get_yahoo_news_with_selenium(keyword: str) -> list[dict]:
     options = Options()
@@ -167,7 +162,6 @@ def get_yahoo_news_with_selenium(keyword: str) -> list[dict]:
     print(f"✅ Yahoo!ニュース件数: {len(articles_data)} 件")
     return articles_data
 
-
 def get_msn_news_with_selenium(keyword: str) -> list[dict]:
     now = datetime.utcnow() + timedelta(hours=9)
     options = Options()
@@ -181,23 +175,31 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
 
     soup = BeautifulSoup(driver.page_source, "html.parser")
     driver.quit()
-    cards = soup.select("a.title")
+    cards = soup.select("div.news-card")
     data = []
 
     for card in cards:
         try:
-            title = card.get_text().strip()
-            url = card.get("href")
-            if not url.startswith("http"):
-                continue
-            pub_date = "取得不可"
-            source = "MSN"
-            data.append({
-                "タイトル": title,
-                "URL": url,
-                "投稿日": pub_date,
-                "引用元": source
-            })
+            title = card.get("data-title", "").strip()
+            url = card.get("data-url", "").strip()
+            source = card.get("data-author", "").strip()
+            pub_label = ""
+
+            pub_tag = card.find("span", attrs={"aria-label": True})
+            if pub_tag and pub_tag.has_attr("aria-label"):
+                pub_label = pub_tag["aria-label"].strip().lower()
+
+            pub_date = parse_relative_time(pub_label, now)
+            if pub_date == "取得不可" and url:
+                pub_date = get_last_modified_datetime(url)
+
+            if title and url:
+                data.append({
+                    "タイトル": title,
+                    "URL": url,
+                    "投稿日": pub_date,
+                    "引用元": source if source else "MSN"
+                })
         except Exception as e:
             print(f"⚠️ MSN記事処理エラー: {e}")
             continue
@@ -205,33 +207,35 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
     print(f"✅ MSNニュース件数: {len(data)} 件")
     return data
 
+def write_to_spreadsheet(articles: list[dict], spreadsheet_id: str, worksheet_name: str):
+    credentials_json_str = os.environ.get('GCP_SERVICE_ACCOUNT_KEY')
+    credentials = json.loads(credentials_json_str) if credentials_json_str else json.load(open('credentials.json'))
+    gc = gspread.service_account_from_dict(credentials)
 
-def write_to_spreadsheet(articles: list[dict], spreadsheet_id: str, sheet_name: str):
-    creds = json.loads(os.environ["GCP_SERVICE_ACCOUNT_KEY"])
-    client = gspread.service_account_from_dict(creds)
-
-    try:
-        sh = client.open_by_key(spreadsheet_id)
+    for attempt in range(5):
         try:
-            worksheet = sh.worksheet(sheet_name)
-        except gspread.exceptions.WorksheetNotFound:
-            worksheet = sh.add_worksheet(title=sheet_name, rows="1000", cols="10")
-            worksheet.append_row(["タイトル", "URL", "投稿日", "引用元"])
+            sh = gc.open_by_key(spreadsheet_id)
+            try:
+                worksheet = sh.worksheet(worksheet_name)
+            except gspread.exceptions.WorksheetNotFound:
+                worksheet = sh.add_worksheet(title=worksheet_name, rows="1", cols="4")
+                worksheet.append_row(['タイトル', 'URL', '投稿日', '引用元'])
 
-        existing_urls = worksheet.col_values(2)[1:]
-        new_rows = []
-        for article in articles:
-            if article["URL"] not in existing_urls:
-                new_rows.append([article["タイトル"], article["URL"], article["投稿日"], article["引用元"]])
+            existing_data = worksheet.get_all_values()
+            existing_urls = set(row[1] for row in existing_data[1:] if len(row) > 1)
 
-        if new_rows:
-            worksheet.append_rows(new_rows)
-            print(f"✅ {len(new_rows)}件をスプレッドシートに追記しました。")
-        else:
-            print("⚠️ 新しい記事はありませんでした。")
-    except Exception as e:
-        print(f"❌ スプレッドシート書き込みエラー: {e}")
+            new_data = [[a['タイトル'], a['URL'], a['投稿日'], a['引用元']] for a in articles if a['URL'] not in existing_urls]
+            if new_data:
+                worksheet.append_rows(new_data, value_input_option='USER_ENTERED')
+                print(f"✅ {len(new_data)}件をスプレッドシートに追記しました。")
+            else:
+                print("⚠️ 追記すべき新しいデータはありません。")
+            return
+        except gspread.exceptions.APIError as e:
+            print(f"⚠️ Google API Error (attempt {attempt + 1}/5): {e}")
+            time.sleep(5 + random.random() * 5)
 
+    raise RuntimeError("❌ Googleスプレッドシートへの書き込みに失敗しました（5回試行しても成功せず）")
 
 if __name__ == "__main__":
     print("\n--- Google News ---")
