@@ -12,12 +12,13 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 import os
 import json
 import gspread
+import random # 追加: リトライ時のランダム待機用
 
 # ✅ 現在時刻（JST） - 全ニュースソースで使用
 now = datetime.utcnow() + timedelta(hours=9)
 
 # ✅ 検索キーワード（複数） - MSNニュースで使用
-KEYWORDS_MSN = ["ホンダ"] # ここを「ホンダ」のみに修正しました
+KEYWORDS_MSN = ["ホンダ"]
 
 # ✅ Google/Yahoo!ニュース用の単一キーワード
 KEYWORD_SINGLE = "ホンダ"
@@ -47,8 +48,8 @@ def get_google_news_with_selenium(keyword: str) -> list[dict]:
     soup = BeautifulSoup(driver.page_source, "html.parser")
     driver.quit()
 
-    articles = soup.find_all("article")
     data = []
+    articles = soup.find_all("article")
     for article in articles:
         try:
             a_tag = article.select_one("a.JtKRv")
@@ -83,9 +84,9 @@ def get_yahoo_news_with_selenium(keyword: str) -> list[dict]:
     soup = BeautifulSoup(driver.page_source, "html.parser")
     driver.quit()
     # 記事コンテナのセレクターを調整
-    articles = soup.find_all("li", class_=re.compile("sc-1u4589e-0"))
     data = []
-
+    articles = soup.find_all("li", class_=re.compile("sc-1u4589e-0"))
+    
     for article in articles:
         try:
             title_tag = article.find("div", class_=re.compile("sc-3ls169-0"))
@@ -124,7 +125,6 @@ def get_msn_news_with_selenium(keywords: list[str]) -> list[dict]:
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
 
-    # driverの初期化はループの外で行い、キーワードごとにページをロード
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     all_msn_data = []
 
@@ -132,11 +132,10 @@ def get_msn_news_with_selenium(keywords: list[str]) -> list[dict]:
         print(f"🔍 MSNニュース - 処理中: {keyword}")
         search_url = f'https://www.bing.com/news/search?q={keyword}&qft=sortbydate%3d"1"&form=YFNR'
         driver.get(search_url)
-        time.sleep(5) # ページが完全にロードされるように少し長めに待つ
+        time.sleep(10) # 待機時間を10秒に延長
 
         soup = BeautifulSoup(driver.page_source, "html.parser")
 
-        # div.news-card を探し、データ属性から情報を抽出
         for card in soup.select('div.news-card'):
             title = card.get("data-title", "").strip()
             url = card.get("data-url", "").strip()
@@ -145,12 +144,10 @@ def get_msn_news_with_selenium(keywords: list[str]) -> list[dict]:
             pub_time_obj = None
             pub_label = ""
 
-            # 投稿時間をaria-label属性から取得
             pub_tag = card.find("span", attrs={"aria-label": True})
             if pub_tag and pub_tag.has_attr("aria-label"):
                 pub_label = pub_tag["aria-label"].strip()
 
-            # 相対時間表記をdatetimeオブジェクトに変換するロジック
             if "分前" in pub_label:
                 m = re.search(r"(\d+)", pub_label)
                 if m:
@@ -165,7 +162,6 @@ def get_msn_news_with_selenium(keywords: list[str]) -> list[dict]:
                     pub_time_obj = now - timedelta(days=int(d.group(1)))
             elif re.match(r'\d+月\d+日', pub_label): # 例: 1月1日
                 try:
-                    # 年は現在の年を使用すると仮定
                     pub_time_obj = datetime.strptime(f"{now.year}年{pub_label}", "%Y年%m月%d日")
                 except:
                     pub_time_obj = None
@@ -190,22 +186,17 @@ def get_msn_news_with_selenium(keywords: list[str]) -> list[dict]:
                     "投稿日": pub_date,
                     "引用元": source if source else "MSN"
                 })
-        # print(f"✅ MSNニュース - キーワード '{keyword}' で {len(all_msn_data)} 件の記事を発見。") # デバッグ用
     
-    driver.quit() # 全キーワード処理後に一度だけドライバーを終了
+    driver.quit()
     print(f"✅ MSNニュース総件数: {len(all_msn_data)} 件")
     return all_msn_data
 
 def write_to_spreadsheet(articles: list[dict], spreadsheet_id: str, worksheet_name: str):
     """記事データをGoogleスプレッドシートに書き込む関数"""
-    # 環境変数から認証情報を取得
     credentials_json_str = os.environ.get('GCP_SERVICE_ACCOUNT_KEY')
-    # 環境変数がない場合はファイルから読み込む（ローカル開発用）
     if credentials_json_str:
         credentials = json.loads(credentials_json_str)
     else:
-        # ローカルでのテスト時に credentials.json が必要
-        # 本番環境では環境変数 GCP_SERVICE_ACCOUNT_KEY にJSON文字列を設定してください
         try:
             with open('credentials.json', 'r') as f:
                 credentials = json.load(f)
@@ -214,35 +205,30 @@ def write_to_spreadsheet(articles: list[dict], spreadsheet_id: str, worksheet_na
 
     gc = gspread.service_account_from_dict(credentials)
 
-    for attempt in range(5): # 複数回リトライ
+    for attempt in range(5):
         try:
             sh = gc.open_by_key(spreadsheet_id)
             try:
                 worksheet = sh.worksheet(worksheet_name)
             except gspread.exceptions.WorksheetNotFound:
-                # ワークシートが存在しない場合は新規作成しヘッダーを追加
                 worksheet = sh.add_worksheet(title=worksheet_name, rows="1", cols="4")
                 worksheet.append_row(['タイトル', 'URL', '投稿日', '引用元'])
 
             existing_data = worksheet.get_all_values()
-            # 既存のURLをセットに格納して重複チェックを高速化
             existing_urls = set(row[1] for row in existing_data[1:] if len(row) > 1)
 
-            # 新しいデータのみをフィルタリング
             new_data = [[a['タイトル'], a['URL'], a['投稿日'], a['引用元']] for a in articles if a['URL'] not in existing_urls]
             
             if new_data:
-                # 新しいデータをスプレッドシートに追記
                 worksheet.append_rows(new_data, value_input_option='USER_ENTERED')
                 print(f"✅ {len(new_data)}件をスプレッドシートに追記しました。")
             else:
                 print("⚠️ 追記すべき新しいデータはありません。")
-            return # 成功したら関数を終了
+            return
         except gspread.exceptions.APIError as e:
             print(f"⚠️ Google API Error (attempt {attempt + 1}/5): {e}")
-            time.sleep(5 + random.random() * 5) # リトライ前に待機
+            time.sleep(5 + random.random() * 5)
     
-    # 5回試行しても成功しない場合はエラー
     raise RuntimeError("❌ Googleスプレッドシートへの書き込みに失敗しました（5回試行しても成功せず）")
 
 if __name__ == "__main__":
@@ -256,13 +242,10 @@ if __name__ == "__main__":
     if yahoo_news_articles:
         write_to_spreadsheet(yahoo_news_articles, SPREADSHEET_ID, "Yahoo")
 
-    # MSNニュースの処理は、キーワードリストで渡す
     print("\n--- MSN News ---")
     msn_news_articles = get_msn_news_with_selenium(KEYWORDS_MSN)
-    # ここで重複排除 (get_msn_news_with_selenium 内ではキーワードごとの重複排除はしていないため)
     df_msn = pd.DataFrame(msn_news_articles)
     if not df_msn.empty:
-        # スプレッドシートに書き込む前に重複排除をかける
         df_msn.drop_duplicates(subset=["URL"], inplace=True)
         write_to_spreadsheet(df_msn.to_dict('records'), SPREADSHEET_ID, "MSN")
     else:
@@ -270,26 +253,21 @@ if __name__ == "__main__":
     
     print("\n--- 全てのニュースソースの抽出とスプレッドシートへの書き込みが完了しました ---")
 
-    # ローカルExcelファイルへの書き出し処理（元のMSN専用スクリプトから統合）
-    # 全てのデータを統合して重複排除
-    # 各ソースの取得結果が空でないことを確認してから結合
     combined_all_data = []
     if google_news_articles:
         combined_all_data.extend(google_news_articles)
     if yahoo_news_articles:
         combined_all_data.extend(yahoo_news_articles)
-    if msn_news_articles: # msn_news_articlesはdf_msnをto_dict('records')する前のリスト
+    if msn_news_articles:
         combined_all_data.extend(msn_news_articles)
 
-    # combined_all_data を DataFrame に変換して重複排除
     df_combined = pd.DataFrame(combined_all_data)
     if not df_combined.empty:
         df_combined.drop_duplicates(subset=["URL"], inplace=True)
     
-        output_file = "all_news_summary.xlsx" # 統合された出力ファイル名
+        output_file = "all_news_summary.xlsx"
         df_combined.to_excel(output_file, index=False)
 
-        # フィルタ付きテーブル追加
         try:
             wb = load_workbook(output_file)
             ws = wb.active
