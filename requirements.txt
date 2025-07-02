@@ -1,7 +1,8 @@
-pandas
 selenium
-beautifulsoup4
 webdriver-manager
+beautifulsoup4
 gspread
 oauth2client
+requests
 openpyxl
+
