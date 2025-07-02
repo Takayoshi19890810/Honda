@@ -181,7 +181,7 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
 
     soup = BeautifulSoup(driver.page_source, "html.parser")
     driver.quit()
-    cards = soup.select("a.t_s")
+    cards = soup.select("a.title")  # ← 修正済みセレクタ
     data = []
 
     for card in cards:
@@ -204,37 +204,6 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
 
     print(f"✅ MSNニュース件数: {len(data)} 件")
     return data
-
-
-def write_to_spreadsheet(articles: list[dict], spreadsheet_id: str, worksheet_name: str):
-    credentials_json_str = os.environ.get('GCP_SERVICE_ACCOUNT_KEY')
-    credentials = json.loads(credentials_json_str) if credentials_json_str else json.load(open('credentials.json'))
-    gc = gspread.service_account_from_dict(credentials)
-
-    for attempt in range(5):
-        try:
-            sh = gc.open_by_key(spreadsheet_id)
-            try:
-                worksheet = sh.worksheet(worksheet_name)
-            except gspread.exceptions.WorksheetNotFound:
-                worksheet = sh.add_worksheet(title=worksheet_name, rows="1", cols="4")
-                worksheet.append_row(['タイトル', 'URL', '投稿日', '引用元'])
-
-            existing_data = worksheet.get_all_values()
-            existing_urls = set(row[1] for row in existing_data[1:] if len(row) > 1)
-
-            new_data = [[a['タイトル'], a['URL'], a['投稿日'], a['引用元']] for a in articles if a['URL'] not in existing_urls]
-            if new_data:
-                worksheet.append_rows(new_data, value_input_option='USER_ENTERED')
-                print(f"✅ {len(new_data)}件をスプレッドシートに追記しました。")
-            else:
-                print("⚠️ 追記すべき新しいデータはありません。")
-            return
-        except gspread.exceptions.APIError as e:
-            print(f"⚠️ Google API Error (attempt {attempt + 1}/5): {e}")
-            time.sleep(5 + random.random() * 5)
-
-    raise RuntimeError("❌ Googleスプレッドシートへの書き込みに失敗しました（5回試行しても成功せず）")
 
 
 if __name__ == "__main__":
