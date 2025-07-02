@@ -11,13 +11,13 @@ from openpyxl import load_workbook
 from openpyxl.worksheet.table import Table, TableStyleInfo
 import os
 import json
-import gspread # ここでgspreadをインポートしています
+import gspread
 
 # ✅ 現在時刻（JST） - 全ニュースソースで使用
 now = datetime.utcnow() + timedelta(hours=9)
 
 # ✅ 検索キーワード（複数） - MSNニュースで使用
-KEYWORDS_MSN = ["Honda", "HONDA", "ホンダ"]
+KEYWORDS_MSN = ["ホンダ"] # ここを「ホンダ」のみに修正しました
 
 # ✅ Google/Yahoo!ニュース用の単一キーワード
 KEYWORD_SINGLE = "ホンダ"
