@@ -1,25 +1,26 @@
-name: Get News Daily
+name: Get News Hourly
 
 on:
   schedule:
-    - cron: '0 21 * * *'  # JST 6:00AM (UTC+9 = 21:00 UTC前日)
+    - cron: '0 * * * *'  # 毎時00分（UTC）に実行 → JSTで毎時+9分
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
+      - uses: actions/checkout@v3
 
-    - name: Install dependencies
-      run: |
-        pip install -r requirements.txt
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
 
-    - name: Run News Script
-      env:
-        GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
-      run: python main.py
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run News Script
+        env:
+          GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+        run: python main.py
