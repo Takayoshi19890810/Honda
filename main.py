@@ -12,7 +12,13 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 import os
 import json
 import gspread
-import random # 追加: リトライ時のランダム待機用
+import random 
+
+# WebDriverWaitとExpectedConditionsのインポート
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+
 
 # ✅ 現在時刻（JST） - 全ニュースソースで使用
 now = datetime.utcnow() + timedelta(hours=9)
@@ -132,7 +138,17 @@ def get_msn_news_with_selenium(keywords: list[str]) -> list[dict]:
         print(f"🔍 MSNニュース - 処理中: {keyword}")
         search_url = f'https://www.bing.com/news/search?q={keyword}&qft=sortbydate%3d"1"&form=YFNR'
         driver.get(search_url)
-        time.sleep(10) # 待機時間を10秒に延長
+        
+        try:
+            # ニュースカードが表示されるまで最大20秒待機
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'div.news-card'))
+            )
+            time.sleep(2) # 待機後、念のため少し待つ
+        except Exception as e:
+            print(f"⚠️ MSNニュース - ニュースカードの読み込みタイムアウトまたはエラー: {e}")
+            driver.quit() # エラー時はドライバーを終了
+            return [] # データを返さずに終了
 
         soup = BeautifulSoup(driver.page_source, "html.parser")
 
