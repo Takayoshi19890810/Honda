@@ -16,7 +16,7 @@ import gspread
 
 # ✅ キーワードとスプレッドシートIDを修正
 KEYWORD = "ホンダ"
-SPREADSHEET_ID = "1AwwMGKMHfduwPkrtsik40lkO1z1T8IU_yd41ku-yPi8"
+SPREADSHEET_ID = "1bYYWjsaSf3Y57nDtwbLkfwtOcOXId_Nd-yrxF184ne4"
 
 def format_datetime(dt_obj):
     return dt_obj.strftime("%Y/%m/%d %H:%M")
