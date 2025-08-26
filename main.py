@@ -16,24 +16,23 @@ from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import gspread
 
-
 # =========================
-# 設定（デフォルト値）
-#   引数または環境変数で上書き可能
-#   - 引数: --keyword, --sheet
-#   - 環境: NEWS_KEYWORD, SPREADSHEET_ID
+# 既定（引数/環境変数で上書き可）
 # =========================
-DEFAULT_KEYWORD = "ホンダ"  # 例: "ホンダ" / "マツダ" など
+DEFAULT_KEYWORD = "ホンダ"  # 例: "ホンダ", "マツダ", "日産" など
 DEFAULT_SPREADSHEET_ID = "1AwwMGKMHfduwPkrtsik40lkO1z1T8IU_yd41ku-yPi8"  # ホンダ用
 
-
+# =========================
+# 共通ユーティリティ
+# =========================
 def format_datetime(dt_obj: datetime) -> str:
     return dt_obj.strftime("%Y/%m/%d %H:%M")
 
+TIME_RE = re.compile(r"(\d+)\s*(分|時間|日)\s*前")  # 例: "7 時間前", "15分前"
 
 def parse_relative_time(pub_label: str, base_time: datetime) -> str:
     """
-    "2時間前" や "15分前" のような相対表現をJST日時文字列にする
+    "2時間前" や "15分前" のような相対表現をJST日時文字列に変換
     """
     if not pub_label:
         return "取得不可"
@@ -71,10 +70,9 @@ def parse_relative_time(pub_label: str, base_time: datetime) -> str:
         pass
     return "取得不可"
 
-
 def get_last_modified_datetime(url: str) -> str:
     """
-    HEADで Last-Modified が取れればJSTに変換して返す
+    HEADの Last-Modified をJSTにして返す
     """
     try:
         response = requests.head(url, timeout=5)
@@ -85,7 +83,6 @@ def get_last_modified_datetime(url: str) -> str:
     except:
         pass
     return "取得不可"
-
 
 def make_driver() -> webdriver.Chrome:
     options = Options()
@@ -100,7 +97,47 @@ def make_driver() -> webdriver.Chrome:
     )
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 
+def clean_source_text(text: str) -> str:
+    """
+    'Merkmal（メルクマール） on MSN 1 時間' → 'Merkmal（メルクマール）'
+    """
+    if not text:
+        return ""
+    t = re.sub(r"\bon\s+MSN\b", "", text, flags=re.IGNORECASE)   # "on MSN" 除去
+    t = TIME_RE.sub("", t)                                       # "◯時間前" 等 除去
+    t = t.replace("・", " ").replace("•", " ").replace("·", " ")
+    return re.sub(r"\s{2,}", " ", t).strip()
 
+def find_relative_label(container) -> str:
+    """
+    コンテナ周辺から '◯分/時間/日前' 文字列または ISO datetime を探す
+    """
+    # aria-label
+    for el in container.select("[aria-label]"):
+        lab = el.get("aria-label", "").strip()
+        if TIME_RE.search(lab):
+            return lab
+    # time要素
+    for el in container.select("time"):
+        t = (el.get_text(strip=True) or "").strip()
+        if TIME_RE.search(t):
+            return t
+        if el.get("datetime"):  # ISO datetime (UTC Z)
+            return el.get("datetime")
+    # 汎用テキスト
+    texts = [
+        container.get_text(" ", strip=True),
+        (container.parent.get_text(" ", strip=True) if container.parent else "")
+    ]
+    for txt in texts:
+        m = TIME_RE.search(txt)
+        if m:
+            return m.group(0)
+    return ""
+
+# =========================
+# 各サイトのスクレイパ
+# =========================
 def get_google_news_with_selenium(keyword: str) -> list[dict]:
     driver = make_driver()
     url = f"https://news.google.com/search?q={keyword}&hl=ja&gl=JP&ceid=JP:ja"
@@ -138,7 +175,6 @@ def get_google_news_with_selenium(keyword: str) -> list[dict]:
     print(f"✅ Googleニュース件数: {len(data)} 件")
     return data
 
-
 def get_yahoo_news_with_selenium(keyword: str) -> list[dict]:
     driver = make_driver()
     search_url = (
@@ -172,7 +208,7 @@ def get_yahoo_news_with_selenium(keyword: str) -> list[dict]:
                 except:
                     formatted_date = date_str
 
-            # 引用元（媒体名）を推定
+            # 引用元（媒体名）
             source_text = ""
             source_tag = article.find("div", class_="sc-n3vj8g-0 yoLqH")
             if source_tag:
@@ -202,13 +238,13 @@ def get_yahoo_news_with_selenium(keyword: str) -> list[dict]:
     print(f"✅ Yahoo!ニュース件数: {len(articles_data)} 件")
     return articles_data
 
-
 def get_msn_news_with_selenium(keyword: str) -> list[dict]:
     """
-    MSN(Bingニュース)のDOM変化に強い版：
-    - Cookie同意クリック
-    - a.title / a[data-title] の両対応
-    - 媒体名・相対時刻を柔軟に抽出
+    MSN(Bingニュース) 強化版：
+    - Cookie同意対応
+    - a.title / a[data-title] 両対応
+    - 周辺テキストから媒体名と相対時刻を分離抽出
+    - 'on MSN' や '◯時間前' を引用元から除去
     - 取れない日時は Last-Modified で補完
     """
     from selenium.webdriver.common.by import By
@@ -217,9 +253,7 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
     from selenium.common.exceptions import TimeoutException
 
     now = datetime.utcnow() + timedelta(hours=9)
-
     driver = make_driver()
-
     url = (
         f"https://www.bing.com/news/search?q={keyword}"
         "&qft=sortbydate%3D%271%27"
@@ -227,7 +261,7 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
     )
     driver.get(url)
 
-    # Cookie同意が出たらクリック
+    # Cookie同意
     try:
         WebDriverWait(driver, 5).until(
             EC.element_to_be_clickable((By.ID, "bnp_btn_accept"))
@@ -243,7 +277,7 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
     except TimeoutException:
         time.sleep(2)
 
-    # Lazy Load対策でスクロール
+    # Lazy Load対策スクロール
     for _ in range(4):
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(1.0)
@@ -252,7 +286,7 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
     driver.quit()
 
     data: list[dict] = []
-    anchors = soup.select("a.title, a[data-title]")  # 新旧両対応
+    anchors = soup.select("a.title, a[data-title]")
 
     for a in anchors:
         try:
@@ -262,46 +296,39 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
                 continue
 
             parent = a.find_parent(["div", "li"]) or a.parent
-            source = ""
-            pub_label = ""
-            pub_date = ""
-
-            # 媒体名・時刻（例: "Car Watch ・ 2時間前"）を収集
-            source_div = None
+            raw_source = ""
             if parent:
-                source_div = parent.select_one("div.source, span.source")
-            if source_div:
-                txt = source_div.get_text(" ", strip=True)
-                parts = [p.strip() for p in re.split(r"[・|•|\u00b7]", txt) if p.strip()]
-                if parts:
-                    source = parts[0]
-                if len(parts) >= 2:
-                    pub_label = parts[1]
+                s_el = parent.select_one("div.source, span.source")
+                if s_el:
+                    raw_source = s_el.get_text(" ", strip=True)
 
-            # 代替：<time> 要素
-            if (not pub_label) and parent:
-                time_el = parent.select_one("time")
-                if time_el and time_el.get("datetime"):
+            # 相対時刻 or ISO datetime
+            label = find_relative_label(parent or a)
+
+            # 投稿日を決定
+            pub_date = "取得不可"
+            if label:
+                if "T" in label and ":" in label and label.endswith("Z"):
+                    # ISO → JST
                     try:
-                        dt = datetime.strptime(time_el["datetime"], "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=9)
+                        dt = datetime.strptime(label, "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=9)
                         pub_date = format_datetime(dt)
                     except:
                         pass
-                elif time_el:
-                    pub_label = time_el.get_text(strip=True)
+                else:
+                    # 相対 → JST
+                    pub_date = parse_relative_time(label, now)
 
-            if not pub_date:
-                pub_date = parse_relative_time(pub_label.lower(), now) if pub_label else "取得不可"
-
-            # まだ取れなければ Last-Modified で補完
             if pub_date == "取得不可":
                 pub_date = get_last_modified_datetime(href)
+
+            source = clean_source_text(raw_source) or "MSN"
 
             data.append({
                 "タイトル": title,
                 "URL": href,
                 "投稿日": pub_date,
-                "引用元": source if source else "MSN"
+                "引用元": source
             })
         except:
             continue
@@ -309,11 +336,13 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
     print(f"✅ MSNニュース件数: {len(data)} 件")
     return data
 
-
+# =========================
+# スプレッドシート書き込み
+# =========================
 def write_to_spreadsheet(articles: list[dict], spreadsheet_id: str, worksheet_name: str):
     """
-    既存URLと重複しないものだけ追記。シートがなければ作成。
-    認証は GCP_SERVICE_ACCOUNT_KEY（環境） or credentials.json（ローカル）を使用。
+    既存URLと重複しないものだけ追記。シートが無ければ作成。
+    認証: GCP_SERVICE_ACCOUNT_KEY（環境） or credentials.json（ローカル）
     """
     credentials_json_str = os.environ.get('GCP_SERVICE_ACCOUNT_KEY')
     credentials = json.loads(credentials_json_str) if credentials_json_str else json.load(open('credentials.json'))
@@ -346,12 +375,10 @@ def write_to_spreadsheet(articles: list[dict], spreadsheet_id: str, worksheet_na
 
     raise RuntimeError("❌ Googleスプレッドシートへの書き込みに失敗しました（5回試行しても成功せず）")
 
-
+# =========================
+# 設定の解決（引数/環境/既定）
+# =========================
 def resolve_config() -> tuple[str, str]:
-    """
-    キーワードとスプレッドシートIDを、
-    引数 > 環境変数 > デフォルト の優先順で決定。
-    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--keyword", type=str, default=None, help="検索キーワード（例: ホンダ）")
     parser.add_argument("--sheet", type=str, default=None, help="スプレッドシートID")
@@ -363,7 +390,9 @@ def resolve_config() -> tuple[str, str]:
     print(f"📄 SPREADSHEET_ID: {spreadsheet_id}")
     return keyword, spreadsheet_id
 
-
+# =========================
+# エントリポイント
+# =========================
 if __name__ == "__main__":
     keyword, spreadsheet_id = resolve_config()
 
