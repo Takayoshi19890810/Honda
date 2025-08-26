@@ -6,6 +6,7 @@ import re
 import random
 import argparse
 import requests
+from urllib.parse import urlparse
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 
@@ -19,8 +20,8 @@ import gspread
 # =========================
 # 既定（引数/環境変数で上書き可）
 # =========================
-DEFAULT_KEYWORD = "ホンダ"  # 例: "ホンダ", "マツダ", "日産" など
-DEFAULT_SPREADSHEET_ID = "1AwwMGKMHfduwPkrtsik40lkO1z1T8IU_yd41ku-yPi8"  # ホンダ用
+DEFAULT_KEYWORD = "ホンダ"
+DEFAULT_SPREADSHEET_ID = "1AwwMGKMHfduwPkrtsik40lkO1z1T8IU_yd41ku-yPi8"
 
 # =========================
 # 共通ユーティリティ
@@ -28,12 +29,10 @@ DEFAULT_SPREADSHEET_ID = "1AwwMGKMHfduwPkrtsik40lkO1z1T8IU_yd41ku-yPi8"  # ホ�
 def format_datetime(dt_obj: datetime) -> str:
     return dt_obj.strftime("%Y/%m/%d %H:%M")
 
-TIME_RE = re.compile(r"(\d+)\s*(分|時間|日)\s*前")  # 例: "7 時間前", "15分前"
+TIME_RE = re.compile(r"(\d+)\s*(分|時間|日)\s*前")
+TIME_ONLY_RE = re.compile(r"^\s*(\d+)\s*(分|時間|日)\s*(前|)?\s*$")
 
 def parse_relative_time(pub_label: str, base_time: datetime) -> str:
-    """
-    "2時間前" や "15分前" のような相対表現をJST日時文字列に変換
-    """
     if not pub_label:
         return "取得不可"
     pub_label = pub_label.strip().lower()
@@ -54,8 +53,7 @@ def parse_relative_time(pub_label: str, base_time: datetime) -> str:
                 dt = base_time - timedelta(days=int(d.group(1)))
                 return format_datetime(dt)
         elif re.match(r'\d+月\d+日', pub_label):
-            dt = datetime.strptime(pub_label, "%m月%d日")
-            dt = dt.replace(year=base_time.year)
+            dt = datetime.strptime(pub_label, "%m月%d日").replace(year=base_time.year)
             return format_datetime(dt)
         elif re.match(r'\d{4}/\d{1,2}/\d{1,2}', pub_label):
             dt = datetime.strptime(pub_label, "%Y/%m/%d")
@@ -71,13 +69,10 @@ def parse_relative_time(pub_label: str, base_time: datetime) -> str:
     return "取得不可"
 
 def get_last_modified_datetime(url: str) -> str:
-    """
-    HEADの Last-Modified をJSTにして返す
-    """
     try:
-        response = requests.head(url, timeout=5)
-        if 'Last-Modified' in response.headers:
-            dt = parsedate_to_datetime(response.headers['Last-Modified'])
+        res = requests.head(url, timeout=5, allow_redirects=True)
+        if 'Last-Modified' in res.headers:
+            dt = parsedate_to_datetime(res.headers['Last-Modified'])
             jst = dt + timedelta(hours=9)
             return format_datetime(jst)
     except:
@@ -86,7 +81,7 @@ def get_last_modified_datetime(url: str) -> str:
 
 def make_driver() -> webdriver.Chrome:
     options = Options()
-    options.add_argument("--headless=new")  # 新ヘッドレス
+    options.add_argument("--headless=new")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--window-size=1280,2000")
@@ -97,43 +92,93 @@ def make_driver() -> webdriver.Chrome:
     )
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 
-def clean_source_text(text: str) -> str:
-    """
-    'Merkmal（メルクマール） on MSN 1 時間' → 'Merkmal（メルクマール）'
-    """
-    if not text:
-        return ""
-    t = re.sub(r"\bon\s+MSN\b", "", text, flags=re.IGNORECASE)   # "on MSN" 除去
-    t = TIME_RE.sub("", t)                                       # "◯時間前" 等 除去
-    t = t.replace("・", " ").replace("•", " ").replace("·", " ")
-    return re.sub(r"\s{2,}", " ", t).strip()
+def resolve_final_url(url: str) -> str:
+    """Google News 等の中間URLを最終URLに解決（成功時のみ置換）"""
+    try:
+        parsed = urlparse(url)
+        if "news.google.com" in parsed.netloc:
+            res = requests.get(url, timeout=6, allow_redirects=True)
+            if res.ok:
+                return res.url
+    except:
+        pass
+    return url
 
-def find_relative_label(container) -> str:
+def publisher_from_url(url: str) -> str:
+    """URLのドメインから媒体名を推定（フォールバック用）"""
+    try:
+        netloc = urlparse(url).netloc.lower()
+        if not netloc:
+            return ""
+        if netloc.endswith("msn.com"):
+            return "MSN"
+        if "news.yahoo.co.jp" in netloc:
+            return "Yahoo"
+        host = netloc.split(":")[0]
+        if host.startswith("www."):
+            host = host[4:]
+        # 必要なら正式名マッピング
+        NAME_MAP = {
+            "response.jp": "レスポンス（Response.jp）",
+            "newsweekjapan.jp": "ニューズウィーク日本版",
+            "bloomberg.co.jp": "ブルームバーグ",
+            "motor-fan.jp": "Motor-Fan",
+            "young-machine.com": "ヤングマシン",
+            "autoc-one.jp": "オートックワン",
+            "as-web.jp": "autosport web",
+            "webcg.net": "WebCG",
+            "bestcarweb.jp": "ベストカーWeb",
+        }
+        if host in NAME_MAP:
+            return NAME_MAP[host]
+        # サブドメインを適当に簡略化
+        base = host
+        parts = host.split(".")
+        if len(parts) >= 2:
+            base = parts[-2]
+        base = base.replace("-", " ").replace("_", " ")
+        return base.capitalize()
+    except:
+        return ""
+
+def clean_source_text(raw: str) -> str:
     """
-    コンテナ周辺から '◯分/時間/日前' 文字列または ISO datetime を探す
+    'Merkmal（メルクマール） 1 時間' → 'Merkmal（メルクマール）'
+    'MSN による配信 1 分' → ''（= 後段でURLから推定）
+    'ブルームバーグ 5 日' → 'ブルームバーグ'
+    単独の '4 日' '7 時間' → ''（= 後段でURLから推定）
     """
-    # aria-label
-    for el in container.select("[aria-label]"):
-        lab = el.get("aria-label", "").strip()
-        if TIME_RE.search(lab):
-            return lab
-    # time要素
-    for el in container.select("time"):
-        t = (el.get_text(strip=True) or "").strip()
-        if TIME_RE.search(t):
-            return t
-        if el.get("datetime"):  # ISO datetime (UTC Z)
-            return el.get("datetime")
-    # 汎用テキスト
-    texts = [
-        container.get_text(" ", strip=True),
-        (container.parent.get_text(" ", strip=True) if container.parent else "")
-    ]
-    for txt in texts:
-        m = TIME_RE.search(txt)
-        if m:
-            return m.group(0)
-    return ""
+    if not raw:
+        return ""
+    t = raw.strip()
+    # よく混入するラベル除去
+    t = re.sub(r"\bon\s+MSN\b", "", t, flags=re.IGNORECASE)     # "on MSN"
+    t = re.sub(r"MSN\s*による配信", "", t)                        # "MSN による配信"
+    t = re.sub(r"(提供|配信)\s*[:：]?", "", t)                   # "提供:","配信:"
+    t = t.replace("・", " ").replace("•", " ").replace("·", " ")
+    # 末尾の "◯分/時間/日前" を除去
+    t = re.sub(r"\s*\d+\s*(分|時間|日)\s*(前|)?\s*$", "", t).strip()
+    # 残存の時間表現を全落とし
+    t = TIME_RE.sub("", t).strip()
+    # 空括弧など掃除
+    t = re.sub(r"\s*\(\s*\)\s*$", "", t).strip()
+    # 連続空白/記号整理
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    t = t.strip("・|•|·|-–—:：").strip()
+    # 単独の時間表現だけなら空
+    if TIME_ONLY_RE.match(t):
+        return ""
+    return t
+
+def is_timeish(text: str) -> bool:
+    """時刻っぽいだけの文字列か判定"""
+    if not text:
+        return False
+    if TIME_ONLY_RE.match(text.strip()):
+        return True
+    if TIME_RE.search(text):
+        return True
+    return False
 
 # =========================
 # 各サイトのスクレイパ
@@ -156,20 +201,32 @@ def get_google_news_with_selenium(keyword: str) -> list[dict]:
         try:
             a_tag = article.select_one("a.JtKRv")
             time_tag = article.select_one("time.hvbAAd")
-            source_tag = article.select_one("div.vr1PYe")
             if not a_tag or not time_tag:
                 continue
 
-            title = a_tag.text.strip()
-            href = a_tag.get("href")
-            url = "https://news.google.com" + href[1:] if href and href.startswith("./") else href
+            title = a_tag.get_text(strip=True)
+            href = a_tag.get("href") or ""
+            url = "https://news.google.com" + href[1:] if href.startswith("./") else href
+
+            # 最終URLへ解決して媒体名フォールバック
+            final_url = resolve_final_url(url)
+            guessed_source = publisher_from_url(final_url)
+
+            # ソース候補（複数セレクタで拾う）
+            source = ""
+            for sel in ["div.vr1PYe", "div.UOVeFe", "a.wEwyrc"]:
+                el = article.select_one(sel)
+                if el:
+                    source = el.get_text(strip=True)
+                    break
+            if not source:
+                source = guessed_source or "Google"
 
             dt = datetime.strptime(time_tag.get("datetime"), "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=9)
             pub_date = format_datetime(dt)
-            source = source_tag.text.strip() if source_tag else "N/A"
 
             if title and url:
-                data.append({"タイトル": title, "URL": url, "投稿日": pub_date, "引用元": source})
+                data.append({"タイトル": title, "URL": final_url, "投稿日": pub_date, "引用元": source})
         except:
             continue
     print(f"✅ Googleニュース件数: {len(data)} 件")
@@ -187,56 +244,61 @@ def get_yahoo_news_with_selenium(keyword: str) -> list[dict]:
     soup = BeautifulSoup(driver.page_source, "html.parser")
     driver.quit()
 
-    articles = soup.find_all("li", class_=re.compile("sc-1u4589e-0"))
-    articles_data: list[dict] = []
+    items = soup.find_all("li", class_=re.compile("sc-1u4589e-0"))
+    data: list[dict] = []
 
-    for article in articles:
+    for li in items:
         try:
-            title_tag = article.find("div", class_=re.compile("sc-3ls169-0"))
-            title = title_tag.text.strip() if title_tag else ""
-            link_tag = article.find("a", href=True)
+            title_tag = li.find("div", class_=re.compile("sc-3ls169-0"))
+            link_tag = li.find("a", href=True)
+            time_tag = li.find("time")
+
+            title = title_tag.get_text(strip=True) if title_tag else ""
             url = link_tag["href"] if link_tag else ""
+            date_str = time_tag.get_text(strip=True) if time_tag else ""
 
-            time_tag = article.find("time")
-            date_str = time_tag.text.strip() if time_tag else ""
-            formatted_date = ""
+            # 日時
+            pub_date = "取得不可"
             if date_str:
-                date_str = re.sub(r'\([月火水木金土日]\)', '', date_str).strip()
+                ds = re.sub(r'\([月火水木金土日]\)', '', date_str).strip()
                 try:
-                    dt_obj = datetime.strptime(date_str, "%Y/%m/%d %H:%M")
-                    formatted_date = format_datetime(dt_obj)
+                    pub_date = format_datetime(datetime.strptime(ds, "%Y/%m/%d %H:%M"))
                 except:
-                    formatted_date = date_str
+                    pub_date = ds
 
-            # 引用元（媒体名）
-            source_text = ""
-            source_tag = article.find("div", class_="sc-n3vj8g-0 yoLqH")
-            if source_tag:
-                inner = source_tag.find("div", class_="sc-110wjhy-8 bsEjY")
-                if inner and inner.span:
-                    candidate = inner.span.text.strip()
-                    if not candidate.isdigit():
-                        source_text = candidate
-            if not source_text or source_text.isdigit():
-                alt_spans = article.find_all(["span", "div"], string=True)
-                for s in alt_spans:
-                    text = s.text.strip()
-                    if 2 <= len(text) <= 20 and not text.isdigit() and re.search(r'[ぁ-んァ-ン一-龥A-Za-z]', text):
-                        source_text = text
+            # 媒体名（周辺から推定）
+            source = ""
+            for sel in [
+                "div.sc-n3vj8g-0.yoLqH div.sc-110wjhy-8.bsEjY span",
+                "div.sc-n3vj8g-0.yoLqH",
+                "span",
+                "div"
+            ]:
+                el = li.select_one(sel)
+                if el:
+                    txt = el.get_text(" ", strip=True)
+                    txt = re.sub(r"\d{4}/\d{1,2}/\d{1,2} \d{2}:\d{2}", "", txt)
+                    txt = re.sub(r"\([^)]+\)", "", txt)
+                    txt = txt.strip()
+                    if txt and not txt.isdigit() and any(ch.isalpha() or '\u3040' <= ch <= '\u9FFF' for ch in txt):
+                        source = txt
                         break
 
+            if not source:
+                source = publisher_from_url(url) or "Yahoo"
+
             if title and url:
-                articles_data.append({
+                data.append({
                     "タイトル": title,
                     "URL": url,
-                    "投稿日": formatted_date if formatted_date else "取得不可",
-                    "引用元": source_text or "Yahoo"
+                    "投稿日": pub_date,
+                    "引用元": source
                 })
         except:
             continue
 
-    print(f"✅ Yahoo!ニュース件数: {len(articles_data)} 件")
-    return articles_data
+    print(f"✅ Yahoo!ニュース件数: {len(data)} 件")
+    return data
 
 def get_msn_news_with_selenium(keyword: str) -> list[dict]:
     """
@@ -296,33 +358,62 @@ def get_msn_news_with_selenium(keyword: str) -> list[dict]:
                 continue
 
             parent = a.find_parent(["div", "li"]) or a.parent
+
+            # 1) まず source ブロック由来の文字列を取得
             raw_source = ""
             if parent:
                 s_el = parent.select_one("div.source, span.source")
                 if s_el:
                     raw_source = s_el.get_text(" ", strip=True)
 
-            # 相対時刻 or ISO datetime
-            label = find_relative_label(parent or a)
+            # 2) 相対時刻 or ISO datetime を拾う（投稿日用）
+            label = ""
+            # aria-label
+            if parent:
+                for el in parent.select("[aria-label]"):
+                    lab = el.get("aria-label", "").strip()
+                    if TIME_RE.search(lab):
+                        label = lab
+                        break
+            # time要素
+            if not label and parent:
+                for el in parent.select("time"):
+                    t = (el.get_text(strip=True) or "").strip()
+                    if TIME_RE.search(t):
+                        label = t
+                        break
+                    if el.get("datetime"):
+                        label = el.get("datetime")
+                        break
 
-            # 投稿日を決定
+            # 投稿日
             pub_date = "取得不可"
             if label:
                 if "T" in label and ":" in label and label.endswith("Z"):
-                    # ISO → JST
                     try:
                         dt = datetime.strptime(label, "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=9)
                         pub_date = format_datetime(dt)
                     except:
                         pass
                 else:
-                    # 相対 → JST
                     pub_date = parse_relative_time(label, now)
-
             if pub_date == "取得不可":
                 pub_date = get_last_modified_datetime(href)
 
-            source = clean_source_text(raw_source) or "MSN"
+            # 3) 引用元クリーニング → 周辺候補 → URL推定 の三段構え
+            source = clean_source_text(raw_source)
+
+            if (not source) and parent:
+                for sel in ["cite", "span.provider", "div.provider", "span.source", "div.source a"]:
+                    el = parent.select_one(sel)
+                    if el:
+                        cand = clean_source_text(el.get_text(" ", strip=True))
+                        if cand and not is_timeish(cand):
+                            source = cand
+                            break
+
+            if (not source) or is_timeish(source):
+                source = publisher_from_url(href) or "MSN"
 
             data.append({
                 "タイトル": title,
