@@ -1,73 +1,252 @@
 # -*- coding: utf-8 -*-
 import os
-import re
-import io
+import json
 import time
+import re
+import random
 import argparse
-from datetime import datetime, timezone, timedelta
-
-import pandas as pd
 import requests
-from bs4 import BeautifulSoup
+from urllib.parse import urlparse
+from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
+from bs4 import BeautifulSoup
+import gspread
 
+# =========================
+# 既定（引数/環境変数で上書き可）
+# =========================
+DEFAULT_KEYWORD = "ホンダ"
+DEFAULT_SPREADSHEET_ID = "1AwwMGKMHfduwPkrtsik40lkO1z1T8IU_yd41ku-yPi8"
 
-# ===== 共通ユーティリティ =====
-def jst_now():
-    return datetime.now(timezone(timedelta(hours=9)))
+# =========================
+# 共通ユーティリティ
+# =========================
+def format_datetime(dt_obj: datetime) -> str:
+    return dt_obj.strftime("%Y/%m/%d %H:%M")
 
-def ym_tag():
-    return jst_now().strftime("%Y-%m")
+TIME_RE = re.compile(r"(\d+)\s*(分|時間|日)\s*前")
+TIME_ONLY_RE = re.compile(r"^\s*(\d+)\s*(分|時間|日)\s*(前|)?\s*$")
 
-def monthly_excel_name():
-    return f"yahoo_news_{jst_now().strftime('%Y-%m')}.xlsx"
+def parse_relative_time(pub_label: str, base_time: datetime) -> str:
+    if not pub_label:
+        return "取得不可"
+    pub_label = pub_label.strip().lower()
+    try:
+        if "分前" in pub_label or "minute" in pub_label:
+            m = re.search(r"(\d+)", pub_label)
+            if m:
+                dt = base_time - timedelta(minutes=int(m.group(1)))
+                return format_datetime(dt)
+        elif "時間前" in pub_label or "hour" in pub_label:
+            h = re.search(r"(\d+)", pub_label)
+            if h:
+                dt = base_time - timedelta(hours=int(h.group(1)))
+                return format_datetime(dt)
+        elif "日前" in pub_label or "day" in pub_label:
+            d = re.search(r"(\d+)", pub_label)
+            if d:
+                dt = base_time - timedelta(days=int(d.group(1)))
+                return format_datetime(dt)
+        elif re.match(r'\d+月\d+日', pub_label):
+            dt = datetime.strptime(pub_label, "%m月%d日").replace(year=base_time.year)
+            return format_datetime(dt)
+        elif re.match(r'\d{4}/\d{1,2}/\d{1,2}', pub_label):
+            dt = datetime.strptime(pub_label, "%Y/%m/%d")
+            return format_datetime(dt)
+        elif re.match(r'\d{1,2}:\d{2}', pub_label):
+            t = datetime.strptime(pub_label, "%H:%M").time()
+            dt = datetime.combine(base_time.date(), t)
+            if dt > base_time:
+                dt -= timedelta(days=1)
+            return format_datetime(dt)
+    except:
+        pass
+    return "取得不可"
 
-DEFAULT_KEYWORD = "ホンダ"   # NEWS_KEYWORD 環境変数 or --keyword で上書き
+def get_last_modified_datetime(url: str) -> str:
+    try:
+        res = requests.head(url, timeout=5, allow_redirects=True)
+        if 'Last-Modified' in res.headers:
+            dt = parsedate_to_datetime(res.headers['Last-Modified'])
+            jst = dt + timedelta(hours=9)
+            return format_datetime(jst)
+    except:
+        pass
+    return "取得不可"
 
-
-# ===== Chrome（headless） =====
 def make_driver() -> webdriver.Chrome:
-    opts = Options()
-    chrome_path = os.getenv("CHROME_PATH")  # Actionsで注入
-    if chrome_path:
-        opts.binary_location = chrome_path
-    opts.add_argument("--headless=new")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--window-size=1280,2000")
-    opts.add_argument(
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--window-size=1280,2000")
+    options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
     )
-    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
+    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 
+def resolve_final_url(url: str) -> str:
+    """Google News 等の中間URLを最終URLに解決（成功時のみ置換）"""
+    try:
+        parsed = urlparse(url)
+        if "news.google.com" in parsed.netloc:
+            res = requests.get(url, timeout=6, allow_redirects=True)
+            if res.ok:
+                return res.url
+    except:
+        pass
+    return url
 
-# ===== Yahoo!ニュース検索 =====
-def format_dt(dt: datetime) -> str:
-    return dt.strftime("%Y/%m/%d %H:%M")
+def publisher_from_url(url: str) -> str:
+    """URLのドメインから媒体名を推定（フォールバック用）"""
+    try:
+        netloc = urlparse(url).netloc.lower()
+        if not netloc:
+            return ""
+        if netloc.endswith("msn.com"):
+            return "MSN"
+        if "news.yahoo.co.jp" in netloc:
+            return "Yahoo"
+        host = netloc.split(":")[0]
+        if host.startswith("www."):
+            host = host[4:]
+        # 必要なら正式名マッピング
+        NAME_MAP = {
+            "response.jp": "レスポンス（Response.jp）",
+            "newsweekjapan.jp": "ニューズウィーク日本版",
+            "bloomberg.co.jp": "ブルームバーグ",
+            "motor-fan.jp": "Motor-Fan",
+            "young-machine.com": "ヤングマシン",
+            "autoc-one.jp": "オートックワン",
+            "as-web.jp": "autosport web",
+            "webcg.net": "WebCG",
+            "bestcarweb.jp": "ベストカーWeb",
+        }
+        if host in NAME_MAP:
+            return NAME_MAP[host]
+        # サブドメインを適当に簡略化
+        base = host
+        parts = host.split(".")
+        if len(parts) >= 2:
+            base = parts[-2]
+        base = base.replace("-", " ").replace("_", " ")
+        return base.capitalize()
+    except:
+        return ""
 
-def get_yahoo_news(keyword: str) -> pd.DataFrame:
+def clean_source_text(raw: str) -> str:
     """
-    Yahoo!ニュース（検索）から タイトル/URL/投稿日/引用元 を取得
-    1ページ分（必要ならページ送り処理を追加可能）
+    'Merkmal（メルクマール） 1 時間' → 'Merkmal（メルクマール）'
+    'MSN による配信 1 分' → ''（= 後段でURLから推定）
+    'ブルームバーグ 5 日' → 'ブルームバーグ'
+    単独の '4 日' '7 時間' → ''（= 後段でURLから推定）
     """
+    if not raw:
+        return ""
+    t = raw.strip()
+    # よく混入するラベル除去
+    t = re.sub(r"\bon\s+MSN\b", "", t, flags=re.IGNORECASE)     # "on MSN"
+    t = re.sub(r"MSN\s*による配信", "", t)                        # "MSN による配信"
+    t = re.sub(r"(提供|配信)\s*[:：]?", "", t)                   # "提供:","配信:"
+    t = t.replace("・", " ").replace("•", " ").replace("·", " ")
+    # 末尾の "◯分/時間/日前" を除去
+    t = re.sub(r"\s*\d+\s*(分|時間|日)\s*(前|)?\s*$", "", t).strip()
+    # 残存の時間表現を全落とし
+    t = TIME_RE.sub("", t).strip()
+    # 空括弧など掃除
+    t = re.sub(r"\s*\(\s*\)\s*$", "", t).strip()
+    # 連続空白/記号整理
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    t = t.strip("・|•|·|-–—:：").strip()
+    # 単独の時間表現だけなら空
+    if TIME_ONLY_RE.match(t):
+        return ""
+    return t
+
+def is_timeish(text: str) -> bool:
+    """時刻っぽいだけの文字列か判定"""
+    if not text:
+        return False
+    if TIME_ONLY_RE.match(text.strip()):
+        return True
+    if TIME_RE.search(text):
+        return True
+    return False
+
+# =========================
+# 各サイトのスクレイパ
+# =========================
+def get_google_news_with_selenium(keyword: str) -> list[dict]:
     driver = make_driver()
-    url = (
+    url = f"https://news.google.com/search?q={keyword}&hl=ja&gl=JP&ceid=JP:ja"
+    driver.get(url)
+    time.sleep(5)
+    for _ in range(3):
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(1.2)
+
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    driver.quit()
+
+    articles = soup.find_all("article")
+    data: list[dict] = []
+    for article in articles:
+        try:
+            a_tag = article.select_one("a.JtKRv")
+            time_tag = article.select_one("time.hvbAAd")
+            if not a_tag or not time_tag:
+                continue
+
+            title = a_tag.get_text(strip=True)
+            href = a_tag.get("href") or ""
+            url = "https://news.google.com" + href[1:] if href.startswith("./") else href
+
+            # 最終URLへ解決して媒体名フォールバック
+            final_url = resolve_final_url(url)
+            guessed_source = publisher_from_url(final_url)
+
+            # ソース候補（複数セレクタで拾う）
+            source = ""
+            for sel in ["div.vr1PYe", "div.UOVeFe", "a.wEwyrc"]:
+                el = article.select_one(sel)
+                if el:
+                    source = el.get_text(strip=True)
+                    break
+            if not source:
+                source = guessed_source or "Google"
+
+            dt = datetime.strptime(time_tag.get("datetime"), "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=9)
+            pub_date = format_datetime(dt)
+
+            if title and url:
+                data.append({"タイトル": title, "URL": final_url, "投稿日": pub_date, "引用元": source})
+        except:
+            continue
+    print(f"✅ Googleニュース件数: {len(data)} 件")
+    return data
+
+def get_yahoo_news_with_selenium(keyword: str) -> list[dict]:
+    driver = make_driver()
+    search_url = (
         f"https://news.yahoo.co.jp/search?p={keyword}"
         f"&ei=utf-8&categories=domestic,world,business,it,science,life,local"
     )
-    driver.get(url)
-    time.sleep(5)  # 初期描画待ち
+    driver.get(search_url)
+    time.sleep(5)
 
     soup = BeautifulSoup(driver.page_source, "html.parser")
     driver.quit()
 
     items = soup.find_all("li", class_=re.compile("sc-1u4589e-0"))
-    rows = []
+    data: list[dict] = []
+
     for li in items:
         try:
             title_tag = li.find("div", class_=re.compile("sc-3ls169-0"))
@@ -78,17 +257,16 @@ def get_yahoo_news(keyword: str) -> pd.DataFrame:
             url = link_tag["href"] if link_tag else ""
             date_str = time_tag.get_text(strip=True) if time_tag else ""
 
-            # 投稿日正規化
+            # 日時
             pub_date = "取得不可"
             if date_str:
                 ds = re.sub(r'\([月火水木金土日]\)', '', date_str).strip()
                 try:
-                    dt = datetime.strptime(ds, "%Y/%m/%d %H:%M")
-                    pub_date = format_dt(dt)
-                except Exception:
+                    pub_date = format_datetime(datetime.strptime(ds, "%Y/%m/%d %H:%M"))
+                except:
                     pub_date = ds
 
-            # 引用元クリーンアップ
+            # 媒体名（周辺から推定）
             source = ""
             for sel in [
                 "div.sc-n3vj8g-0.yoLqH div.sc-110wjhy-8.bsEjY span",
@@ -97,102 +275,229 @@ def get_yahoo_news(keyword: str) -> pd.DataFrame:
                 "div"
             ]:
                 el = li.select_one(sel)
-                if not el:
-                    continue
-                txt = el.get_text(" ", strip=True)
+                if el:
+                    txt = el.get_text(" ", strip=True)
+                    txt = re.sub(r"\d{4}/\d{1,2}/\d{1,2} \d{2}:\d{2}", "", txt)
+                    txt = re.sub(r"\([^)]+\)", "", txt)
+                    txt = txt.strip()
+                    if txt and not txt.isdigit() and any(ch.isalpha() or '\u3040' <= ch <= '\u9FFF' for ch in txt):
+                        source = txt
+                        break
 
-                # 日付（YYYY/MM/DD HH:MM または M/D H:MM）を削除
-                txt = re.sub(r"\d{1,4}/\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}", "", txt)
-                txt = re.sub(r"\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}", "", txt)
-
-                # 丸括弧内を削除
-                txt = re.sub(r"\([^)]+\)", "", txt)
-
-                # 先頭の数字＋空白を削除（例: "2 Merkmal" → "Merkmal"）
-                txt = re.sub(r"^\d+\s*", "", txt)
-
-                txt = txt.strip()
-                if txt and not txt.isdigit():
-                    source = txt
-                    break
+            if not source:
+                source = publisher_from_url(url) or "Yahoo"
 
             if title and url:
-                rows.append({"タイトル": title, "URL": url, "投稿日": pub_date, "引用元": source or "Yahoo"})
-        except Exception:
+                data.append({
+                    "タイトル": title,
+                    "URL": url,
+                    "投稿日": pub_date,
+                    "引用元": source
+                })
+        except:
             continue
 
-    return pd.DataFrame(rows, columns=["タイトル", "URL", "投稿日", "引用元"])
+    print(f"✅ Yahoo!ニュース件数: {len(data)} 件")
+    return data
 
+def get_msn_news_with_selenium(keyword: str) -> list[dict]:
+    """
+    MSN(Bingニュース) 強化版：
+    - Cookie同意対応
+    - a.title / a[data-title] 両対応
+    - 周辺テキストから媒体名と相対時刻を分離抽出
+    - 'on MSN' や '◯時間前' を引用元から除去
+    - 取れない日時は Last-Modified で補完
+    """
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException
 
-# ===== Releaseから既存Excelを取得 =====
-def download_existing_from_release(repo: str, tag: str, asset_name: str, token: str) -> pd.DataFrame:
-    """Release(tag)に存在すればExcelをDLしてDFで返す。無ければ空DF。"""
-    if not (repo and tag and token):
-        return pd.DataFrame(columns=["タイトル", "URL", "投稿日", "引用元"])
+    now = datetime.utcnow() + timedelta(hours=9)
+    driver = make_driver()
+    url = (
+        f"https://www.bing.com/news/search?q={keyword}"
+        "&qft=sortbydate%3D%271%27"
+        "&setlang=ja&cc=JP&FORM=HDRSC6"
+    )
+    driver.get(url)
 
-    base = "https://api.github.com"
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    # Cookie同意
+    try:
+        WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.ID, "bnp_btn_accept"))
+        ).click()
+    except TimeoutException:
+        pass
 
-    r = requests.get(f"{base}/repos/{repo}/releases/tags/{tag}", headers=headers)
-    if r.status_code != 200:
-        return pd.DataFrame(columns=["タイトル", "URL", "投稿日", "引用元"])
-    rel = r.json()
+    # 記事読み込み待ち
+    try:
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "a.title, a[data-title]"))
+        )
+    except TimeoutException:
+        time.sleep(2)
 
-    asset = next((a for a in rel.get("assets", []) if a.get("name") == asset_name), None)
-    if not asset:
-        return pd.DataFrame(columns=["タイトル", "URL", "投稿日", "引用元"])
+    # Lazy Load対策スクロール
+    for _ in range(4):
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(1.0)
 
-    headers_dl = headers | {"Accept": "application/octet-stream"}
-    dr = requests.get(asset["url"], headers=headers_dl)
-    if dr.status_code != 200:
-        return pd.DataFrame(columns=["タイトル", "URL", "投稿日", "引用元"])
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    driver.quit()
 
-    with io.BytesIO(dr.content) as bio:
+    data: list[dict] = []
+    anchors = soup.select("a.title, a[data-title]")
+
+    for a in anchors:
         try:
-            df = pd.read_excel(bio, sheet_name="news")
-            return df[["タイトル", "URL", "投稿日", "引用元"]].copy()
-        except Exception:
-            return pd.DataFrame(columns=["タイトル", "URL", "投稿日", "引用元"])
+            title = (a.get("data-title") or a.get_text(strip=True) or "").strip()
+            href = a.get("href") or ""
+            if not (title and href):
+                continue
 
+            parent = a.find_parent(["div", "li"]) or a.parent
 
-# ===== メイン =====
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--keyword", type=str, default=None, help="検索キーワード（未指定なら環境変数NEWS_KEYWORD、なければホンダ）")
-    args = ap.parse_args()
+            # 1) まず source ブロック由来の文字列を取得
+            raw_source = ""
+            if parent:
+                s_el = parent.select_one("div.source, span.source")
+                if s_el:
+                    raw_source = s_el.get_text(" ", strip=True)
+
+            # 2) 相対時刻 or ISO datetime を拾う（投稿日用）
+            label = ""
+            # aria-label
+            if parent:
+                for el in parent.select("[aria-label]"):
+                    lab = el.get("aria-label", "").strip()
+                    if TIME_RE.search(lab):
+                        label = lab
+                        break
+            # time要素
+            if not label and parent:
+                for el in parent.select("time"):
+                    t = (el.get_text(strip=True) or "").strip()
+                    if TIME_RE.search(t):
+                        label = t
+                        break
+                    if el.get("datetime"):
+                        label = el.get("datetime")
+                        break
+
+            # 投稿日
+            pub_date = "取得不可"
+            if label:
+                if "T" in label and ":" in label and label.endswith("Z"):
+                    try:
+                        dt = datetime.strptime(label, "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=9)
+                        pub_date = format_datetime(dt)
+                    except:
+                        pass
+                else:
+                    pub_date = parse_relative_time(label, now)
+            if pub_date == "取得不可":
+                pub_date = get_last_modified_datetime(href)
+
+            # 3) 引用元クリーニング → 周辺候補 → URL推定 の三段構え
+            source = clean_source_text(raw_source)
+
+            if (not source) and parent:
+                for sel in ["cite", "span.provider", "div.provider", "span.source", "div.source a"]:
+                    el = parent.select_one(sel)
+                    if el:
+                        cand = clean_source_text(el.get_text(" ", strip=True))
+                        if cand and not is_timeish(cand):
+                            source = cand
+                            break
+
+            if (not source) or is_timeish(source):
+                source = publisher_from_url(href) or "MSN"
+
+            data.append({
+                "タイトル": title,
+                "URL": href,
+                "投稿日": pub_date,
+                "引用元": source
+            })
+        except:
+            continue
+
+    print(f"✅ MSNニュース件数: {len(data)} 件")
+    return data
+
+# =========================
+# スプレッドシート書き込み
+# =========================
+def write_to_spreadsheet(articles: list[dict], spreadsheet_id: str, worksheet_name: str):
+    """
+    既存URLと重複しないものだけ追記。シートが無ければ作成。
+    認証: GCP_SERVICE_ACCOUNT_KEY（環境） or credentials.json（ローカル）
+    """
+    credentials_json_str = os.environ.get('GCP_SERVICE_ACCOUNT_KEY')
+    credentials = json.loads(credentials_json_str) if credentials_json_str else json.load(open('credentials.json'))
+    gc = gspread.service_account_from_dict(credentials)
+
+    for attempt in range(5):
+        try:
+            sh = gc.open_by_key(spreadsheet_id)
+            try:
+                ws = sh.worksheet(worksheet_name)
+            except gspread.exceptions.WorksheetNotFound:
+                ws = sh.add_worksheet(title=worksheet_name, rows="1", cols="4")
+                ws.append_row(['タイトル', 'URL', '投稿日', '引用元'])
+
+            existing = ws.get_all_values()
+            existing_urls = set(row[1] for row in existing[1:] if len(row) > 1)
+
+            new_rows = [[a['タイトル'], a['URL'], a['投稿日'], a['引用元']]
+                        for a in articles if a['URL'] not in existing_urls]
+
+            if new_rows:
+                ws.append_rows(new_rows, value_input_option='USER_ENTERED')
+                print(f"✅ {len(new_rows)}件をスプレッドシート「{worksheet_name}」に追記しました。")
+            else:
+                print(f"⚠️ 追記すべき新しいデータはありません。（{worksheet_name}）")
+            return
+        except gspread.exceptions.APIError as e:
+            print(f"⚠️ Google API Error (attempt {attempt + 1}/5): {e}")
+            time.sleep(5 + random.random() * 5)
+
+    raise RuntimeError("❌ Googleスプレッドシートへの書き込みに失敗しました（5回試行しても成功せず）")
+
+# =========================
+# 設定の解決（引数/環境/既定）
+# =========================
+def resolve_config() -> tuple[str, str]:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--keyword", type=str, default=None, help="検索キーワード（例: ホンダ）")
+    parser.add_argument("--sheet", type=str, default=None, help="スプレッドシートID")
+    args = parser.parse_args()
 
     keyword = args.keyword or os.getenv("NEWS_KEYWORD") or DEFAULT_KEYWORD
+    spreadsheet_id = args.sheet or os.getenv("SPREADSHEET_ID") or DEFAULT_SPREADSHEET_ID
     print(f"🔎 キーワード: {keyword}")
+    print(f"📄 SPREADSHEET_ID: {spreadsheet_id}")
+    return keyword, spreadsheet_id
 
-    # 1) 最新取得
-    df_new = get_yahoo_news(keyword)
-
-    # 2) 既存（同月Release資産）とマージ
-    token = os.getenv("GITHUB_TOKEN", "")
-    repo = os.getenv("GITHUB_REPOSITORY", "")
-    tag = f"news-{ym_tag()}"
-    asset = monthly_excel_name()
-
-    df_old = download_existing_from_release(repo, tag, asset, token)
-    df_all = pd.concat([df_old, df_new], ignore_index=True)
-
-    if not df_all.empty:
-        df_all = df_all.dropna(subset=["URL"]).drop_duplicates(subset=["URL"], keep="last")
-        # 投稿日で降順（変換できない値は末尾）
-        try:
-            dt = pd.to_datetime(df_all["投稿日"], errors="coerce", format="%Y/%m/%d %H:%M")
-            df_all = df_all.assign(_dt=dt).sort_values("_dt", ascending=False).drop(columns=["_dt"])
-        except Exception:
-            pass
-
-    # 3) 保存（単一シート news）
-    os.makedirs("output", exist_ok=True)
-    out_path = os.path.join("output", monthly_excel_name())
-    with pd.ExcelWriter(out_path, engine="openpyxl") as w:
-        df_all.to_excel(w, index=False, sheet_name="news")
-
-    print(f"✅ Excel出力: {out_path}（合計 {len(df_all)} 件、うち新規 {len(df_new)} 件）")
-
-
+# =========================
+# エントリポイント
+# =========================
 if __name__ == "__main__":
-    main()
+    keyword, spreadsheet_id = resolve_config()
+
+    print("\n--- Google News ---")
+    google_news_articles = get_google_news_with_selenium(keyword)
+    if google_news_articles:
+        write_to_spreadsheet(google_news_articles, spreadsheet_id, "Google")
+
+    print("\n--- Yahoo! News ---")
+    yahoo_news_articles = get_yahoo_news_with_selenium(keyword)
+    if yahoo_news_articles:
+        write_to_spreadsheet(yahoo_news_articles, spreadsheet_id, "Yahoo")
+
+    print("\n--- MSN News ---")
+    msn_news_articles = get_msn_news_with_selenium(keyword)
+    if msn_news_articles:
+        write_to_spreadsheet(msn_news_articles, spreadsheet_id, "MSN")
